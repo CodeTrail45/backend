@@ -1,0 +1,35 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# # Virtual environment
+# .venv/
+# venv/
+# ENV/
+# env/
+
+# Editor configs
+.vscode/
+.idea/
+
+# Logs and output
+*.log
+*.out
+
+# OS files
+.DS_Store
+
+# Environment variables
+.env
+
+# Python packaging
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# MyPy / Pyright
+.mypy_cache/
+.pyright/
