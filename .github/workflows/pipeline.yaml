@@ -22,15 +22,15 @@ jobs:
           key: ${{ secrets.EC2_PRIVATE_KEY }}
           script: |
             set -e
-            echo "🧹 Cleaning up old temp directory..."
-            rm -rf /home/ubuntu/backend-temp || true
-            mkdir -p /home/ubuntu/backend-temp
+            echo "🧹 Cleaning up old app directory..."
+            rm -rf /home/ubuntu/backend-app || true
+            mkdir -p /home/ubuntu/backend-app
 
             echo "📥 Cloning latest repo..."
-            git clone git@github.com:${{ github.repository }} /home/ubuntu/backend-temp
+            git clone git@github.com:${{ github.repository }} /home/ubuntu/backend-app
 
             echo "🔐 Creating .env file..."
-            cat <<EOF > /home/ubuntu/backend-temp/.env
+            cat <<EOF > /home/ubuntu/backend-app/.env
             DB_HOST=${{ secrets.DB_HOST }}
             DB_PORT=${{ secrets.DB_PORT }}
             DB_USER=${{ secrets.DB_USER }}
@@ -40,14 +40,6 @@ jobs:
             OPENAI_MODEL=${{ secrets.OPENAI_MODEL }}
             RAPIDAPI_KEY=${{ secrets.RAPIDAPI_KEY }}
             EOF
-
-            ls -la
-
-            echo "🧼 Cleaning existing deployment directory..."
-            rm -rf /home/ubuntu/backend-app/*
-
-            echo "🚚 Moving build to deployment directory..."
-            mv /home/ubuntu/backend-temp/* /home/ubuntu/backend-app/
 
             echo "📦 Deploying app"
             cd /home/ubuntu/backend-app
