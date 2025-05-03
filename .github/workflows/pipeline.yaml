@@ -1,4 +1,4 @@
-name: Deploy to EC2
+name: Deploy Next.js to EC2
 
 on:
   push:
@@ -7,33 +7,47 @@ on:
 
 jobs:
   deploy:
+    name: Build and Deploy via SSH to EC2
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Set up SSH key
-      run: |
-        mkdir -p ~/.ssh
-        echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2_key.pem
-        chmod 600 ~/.ssh/ec2_key.pem
+      - name: SSH & Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_PRIVATE_KEY }}
+          script: |
+            set -e
+            echo "🧹 Cleaning up old temp directory..."
+            rm -rf /home/ubuntu/backend-temp || true
+            mkdir -p /home/ubuntu/backend-temp
 
-    - name: SSH and deploy to EC2
-      run: |
-        ssh -o StrictHostKeyChecking=no -i ~/.ssh/ec2_key.pem -p ${{ secrets.EC2_PORT }} ${{ secrets.EC2_HOST }} << 'EOF'
-          set -e
-          cd ${{ secrets.EC2_PROJECT_PATH }}
+            echo "📥 Cloning latest repo..."
+            git clone git@github.com:${{ github.repository }} /home/ubuntu/backend-temp
 
-          # Pull latest code
-          git pull origin main
+            echo "🔐 Creating .env file..."
+            cat <<EOF > /home/ubuntu/backend-temp/.env
+            DB_HOST=${{ secrets.DB_HOST }}
+            DB_PORT=${{ secrets.DB_PORT }}
+            DB_USER=${{ secrets.DB_USER }}
+            DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+            DB_NAME=${{ secrets.DB_NAME }}
+            OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+            OPENAI_MODEL=${{ secrets.OPENAI_MODEL }}
+            RAPIDAPI_KEY=${{ secrets.RAPIDAPI_KEY }}
+            EOF
 
-          # Activate virtualenv
-          source venv/bin/activate || python3 -m venv venv && source venv/bin/activate
+            # echo "🧼 Cleaning existing deployment directory..."
+            rm -rf /home/ubuntu/backend-app/*
 
-          # Install dependencies
-          pip install -r requirements.txt
+            # echo "🚚 Moving build to deployment directory..."
+            mv /home/ubuntu/backend-temp/* /home/ubuntu/backend-app/
 
-          # Run your app (customize this)
-          nohup python3 main.py > app.log 2>&1 &
-        EOF
+            echo "📦 Installing dependencies..."
+            cd /home/ubuntu/backend-app
+            chmod +x setup.sh
+            ./setup.sh
