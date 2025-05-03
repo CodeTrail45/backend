@@ -21,9 +21,17 @@ jobs:
           username: ubuntu
           key: ${{ secrets.EC2_PRIVATE_KEY }}
           script: |
-            set -e
+            set -eux
             echo "🧹 Cleaning up old app directory..."
             rm -rf /home/ubuntu/backend-app || true
+
+            echo "killing current running process"
+            PID=$(lsof -t -i:8000)
+            if [ -n "$PID" ]; then
+              echo "Killing existing uvicorn process (PID: $PID)"
+              kill -9 $PID
+            fi
+
             mkdir -p /home/ubuntu/backend-app
 
             echo "📥 Cloning latest repo..."
