@@ -34,3 +34,5 @@ build/
 .mypy_cache/
 .pyright/
 venv
+data.env
+*.env

@@ -41,6 +41,8 @@ jobs:
             RAPIDAPI_KEY=${{ secrets.RAPIDAPI_KEY }}
             EOF
 
+            ls -la
+
             echo "🧼 Cleaning existing deployment directory..."
             rm -rf /home/ubuntu/backend-app/*
 

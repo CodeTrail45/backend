@@ -13,4 +13,4 @@ pip install -r requirements.txt
 export OPENAI_API_KEY='sk-krDgakZDZGiAMLYBNgNY1yXMiIvGCF2025wWCQByQeT3BlbkFJLQqZ3LsaD3EguAawmLOq-_HEs3rg3jaThWtpsBeroA'
 
 # Start the FastAPI server
-uvicorn app:app --host 0.0.0.0 --port 8000
+uvicorn app:app --host 0.0.0.0 --port 8000 > app.log 2>&1 &
