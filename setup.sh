@@ -14,5 +14,3 @@ export OPENAI_API_KEY='sk-krDgakZDZGiAMLYBNgNY1yXMiIvGCF2025wWCQByQeT3BlbkFJLQqZ
 
 # Start the FastAPI server
 uvicorn app:app --host 0.0.0.0 --port 8000
-
-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

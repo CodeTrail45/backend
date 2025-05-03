@@ -41,13 +41,13 @@ jobs:
             RAPIDAPI_KEY=${{ secrets.RAPIDAPI_KEY }}
             EOF
 
-            # echo "🧼 Cleaning existing deployment directory..."
+            echo "🧼 Cleaning existing deployment directory..."
             rm -rf /home/ubuntu/backend-app/*
 
-            # echo "🚚 Moving build to deployment directory..."
+            echo "🚚 Moving build to deployment directory..."
             mv /home/ubuntu/backend-temp/* /home/ubuntu/backend-app/
 
-            echo "📦 Installing dependencies..."
+            echo "📦 Deploying app"
             cd /home/ubuntu/backend-app
             chmod +x setup.sh
             ./setup.sh
