@@ -33,3 +33,4 @@ build/
 # MyPy / Pyright
 .mypy_cache/
 .pyright/
+venv

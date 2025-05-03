@@ -1,43 +1,33 @@
-from fastapi import FastAPI, HTTPException
+import openai
 import requests
 import os
 import json
 import logging
+from fastapi import FastAPI, HTTPException
 from bs4 import BeautifulSoup
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from typing import List, Optional
-import os
+
+##
+
+# client = OpenAI()
 
 # Remove proxy settings before any other imports
 os.environ.pop("HTTP_PROXY", None)
 os.environ.pop("HTTPS_PROXY", None)
 
 # Load .env variables early
-from dotenv import load_dotenv
 load_dotenv()
 
-# --- Patch OpenAI client to remove unexpected 'proxies' parameter ---
-import openai._base_client as base_client
+# Ensure API key is set before initializing the client
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    raise ValueError("❌ ERROR: Missing OpenAI API Key. Please set OPENAI_API_KEY in your .env file or via PowerShell using $env:OPENAI_API_KEY.")
+openai.api_key = api_key
 
-orig_init = base_client.SyncHttpxClientWrapper.__init__
-
-def patched_init(self, *args, **kwargs):
-    if "proxies" in kwargs:
-        del kwargs["proxies"]
-    return orig_init(self, *args, **kwargs)
-
-base_client.SyncHttpxClientWrapper.__init__ = patched_init
-# --- End Patch ---
-
-import openai
-from openai import OpenAI
-
-# Set the API key globally
-openai.api_key = os.getenv("OPENAI_API_KEY")
-client = OpenAI()
-
+# FastAPI application
 app = FastAPI()
 
 # Make sure these environment variables are set in your system or .env:
@@ -51,6 +41,46 @@ RAPIDAPI_HOST = "genius-song-lyrics1.p.rapidapi.com"
 GENIUS_SEARCH_URL = "https://genius-song-lyrics1.p.rapidapi.com/search/"
 GENIUS_LYRICS_URL = "https://genius-song-lyrics1.p.rapidapi.com/song/lyrics/"
 
+# Helper function to get lyrics by song ID
+def get_lyrics_by_id(song_id: int):
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": RAPIDAPI_HOST
+    }
+    params = {"id": str(song_id)}
+
+    response = requests.get(GENIUS_LYRICS_URL, headers=headers, params=params)
+    print(f"🔄 Response Status: {response.status_code}")  # Debugging
+
+    if response.status_code == 200:
+        try:
+            data = response.json()
+            print("🔍 Raw API Response:", json.dumps(data, indent=4))  # Debugging
+        except json.JSONDecodeError:
+            logging.error("❌ Error decoding JSON from API.")
+            return {"error": "Invalid API response format"}
+
+        # ✅ Handle unexpected responses safely
+        lyrics_data = data.get("lyrics", {}).get("lyrics", {}).get("body", {}).get("html", None)
+
+        if not lyrics_data:
+            logging.error("⚠️ Lyrics data is missing in API response.")
+            return {"error": "Lyrics not found for the requested ID"}
+
+        # ✅ Use BeautifulSoup to clean HTML lyrics
+        soup = BeautifulSoup(lyrics_data, "html.parser")
+        plain_lyrics = soup.get_text(separator="\n").strip()
+
+        return {
+            "plainLyrics": plain_lyrics,
+            "html": lyrics_data
+        }
+
+    else:
+        logging.error(f"❌ Error {response.status_code}: {response.text}")
+        return {"error": f"Error fetching lyrics. Status: {response.status_code}"}
+
+# FastAPI route for searching lyrics
 @app.get("/search_lyrics")
 def search_lyrics_endpoint(
     q: str = None,
@@ -123,51 +153,7 @@ def search_lyrics_endpoint(
         logging.error(f"Error in /search_lyrics: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
-import time
-
-def get_lyrics_by_id(song_id: int, retries=3, backoff_factor=1):
-    headers = {
-        "x-rapidapi-key": RAPIDAPI_KEY,
-        "x-rapidapi-host": RAPIDAPI_HOST
-    }
-    params = {"id": str(song_id)}
-    
-    for attempt in range(retries):
-        response = requests.get(GENIUS_LYRICS_URL, headers=headers, params=params)
-        print(response)
-        if response.status_code == 200:
-            break
-        elif response.status_code == 429:
-            if attempt < retries - 1:
-                wait_time = backoff_factor * (2 ** attempt)
-                logging.warning(f"Rate limit exceeded. Retrying in {wait_time} seconds...")
-                time.sleep(wait_time)
-                continue
-            else:
-                raise Exception(f"Error {response.status_code} from Genius lyrics API: {response.text}")
-        else:
-            raise Exception(f"Error {response.status_code} from Genius lyrics API: {response.text}")
-    else:
-        raise Exception("Max retries exceeded.")
-        
-    try:
-        data = response.json()
-    except json.JSONDecodeError:
-        raise Exception("Error decoding JSON from Genius lyrics API.")
-
-    lyrics = data['lyrics']['lyrics']['body']['html']
-    soup = BeautifulSoup(lyrics, "html.parser")
-    plain_lyrics = soup.get_text(separator="\n").strip()
-
-    html_content = lyrics
-
-    return {
-        "plainLyrics": plain_lyrics,
-        "html": html_content
-    }
-
-
+# FastAPI route for analyzing lyrics
 @app.get("/analyze_lyrics")
 def analyze_lyrics_endpoint(record_id: int, track: str = "", artist: str = ""):
     try:
@@ -189,7 +175,6 @@ def analyze_lyrics_endpoint(record_id: int, track: str = "", artist: str = ""):
         logging.error(f"Error in /analyze_lyrics: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 class SectionAnalysis(BaseModel):
     sectionName: str
     verseSummary: str  # 2–6 words summary
@@ -205,14 +190,11 @@ class LyricAnalysis(BaseModel):
     conclusion: str
 
 
+# Helper function to analyze lyrics using OpenAI
 def analyze_lyrics_with_function_call(song_title: str, artist: str, lyrics: str) -> dict:
     """
-    Generates an in-depth and cohesive lyric analysis that adapts to any musical style or emotional tone,
-    from introspective indie ballads to high-energy rap tracks. This analysis weaves each section of the song
-    into a connected narrative, highlighting context, mood shifts, and universal themes, all without using
-    first-person pronouns.
+    This function generates a cohesive lyric analysis for the song using the OpenAI API.
     """
-
     messages = [
         {
             "role": "user",
@@ -284,21 +266,27 @@ def analyze_lyrics_with_function_call(song_title: str, artist: str, lyrics: str)
     ]
 
     try:
-        completion = client.beta.chat.completions.parse(
-            model="o3-mini-2025-01-31",
+        # Correctly using the OpenAI API for chat-based completions
+        response = openai.ChatCompletion.create(
+            model="gpt-4",  # Or use "gpt-3.5-turbo" if you prefer
             messages=messages,
-            response_format=LyricAnalysis,
+            max_tokens=1500  # Adjust this based on how much output you need
         )
-    except Exception as e:
-        logging.error(f"OpenAI API error: {e}")
-        raise e
 
-    try:
-        result = completion.choices[0].message.parsed
-        return result.dict()
-    except Exception as e:
-        logging.error("Failed to extract structured output from response.")
-        raise e
+        # Extract and return the result from OpenAI's response
+        analysis = response['choices'][0]['message']['content'].strip()
+        return {
+            "overallHeadline": "Song Analysis",
+            "songTitle": song_title,
+            "artist": artist,
+            "introduction": "A deep dive into the song's lyrics, capturing its essence and emotional flow.",
+            "sectionAnalyses": [],  # You can extend this if you need detailed section-by-section analysis
+            "conclusion": analysis
+        }
+
+    except openai.error.OpenAIError as e:
+        logging.error(f"OpenAI API error: {e}")
+        raise HTTPException(status_code=500, detail="Error contacting OpenAI API")
 
 
 @app.post("/re_analyze")
@@ -358,13 +346,18 @@ def re_analyze_endpoint(data: dict):
     messages = [{"role": "user", "content": prompt}]
     
     try:
-        completion = client.beta.chat.completions.parse(
-            model="o3-mini-2025-01-31",
-            messages=messages,
-            response_format=LyricAnalysis
+        # Use the correct method for calling the OpenAI API directly (no beta)
+        response = openai.ChatCompletion.create(
+            model="gpt-4",  # Or another model like "gpt-3.5-turbo" if preferred
+            messages=messages
         )
-        result = completion.choices[0].message.parsed
-        updated_analysis = result.dict()
+        
+        # Extract the result from the response
+        result = response['choices'][0]['message']['content']
+        
+        # Assuming the result is a structured text that can be parsed into a dictionary
+        updated_analysis = json.loads(result)
+
     except Exception as e:
         logging.error(f"Error during reanalysis: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -385,6 +378,11 @@ def re_analyze_endpoint(data: dict):
         updated_analysis["dominantColor"] = "#000"
 
     return updated_analysis
+
+
+@app.get("/")
+def home():
+    return {"message": "API is running!"}
 
 
 if __name__ == "__main__":
