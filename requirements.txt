@@ -7,3 +7,14 @@ requests
 beautifulsoup4
 python-dotenv
 pg
+sqlalchemy
+psycopg2-binary
+alembic
+pytest
+pytest-asyncio
+httpx
+passlib[bcrypt]
+python-jose[cryptography]
+python-multipart
+email-validator
+starlette
