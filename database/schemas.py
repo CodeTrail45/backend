@@ -2,29 +2,6 @@ from pydantic import BaseModel, ConfigDict, EmailStr
 from typing import List, Optional
 from datetime import datetime
 
-class CommentBase(BaseModel):
-    content: str
-
-class CommentCreate(CommentBase):
-    song_id: int
-    user_id: Optional[int] = None
-    ip_address: Optional[str] = None
-
-class Comment(CommentBase):
-    id: int
-    song_id: int
-    user_id: Optional[int]
-    ip_address: Optional[str]
-    upvote_count: int
-    created_at: datetime
-    updated_at: datetime
-
-    model_config = ConfigDict(from_attributes=True)
-
-class CommentUpvote(BaseModel):
-    comment_id: int
-    ip_address: str
-
 class SongBase(BaseModel):
     title: str
     artist: str
@@ -38,7 +15,6 @@ class Song(SongBase):
     view_count: int
     created_at: datetime
     updated_at: datetime
-    comments: List[Comment] = []
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -75,5 +51,31 @@ class User(UserBase):
     id: int
     is_active: bool
     created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+class CommentBase(BaseModel):
+    content: str
+    song_id: int
+
+class CommentCreate(CommentBase):
+    pass
+
+class Comment(CommentBase):
+    id: int
+    user_id: Optional[int] = None
+    username: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+class CommentResponse(BaseModel):
+    id: int
+    content: str
+    song_id: int
+    username: str
+    created_at: datetime
+    updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True) 

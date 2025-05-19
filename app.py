@@ -4,6 +4,7 @@ import os
 import json
 import logging
 from fastapi import FastAPI, HTTPException, Depends, Query, status, Form, Request
+from fastapi.middleware.cors import CORSMiddleware
 from bs4 import BeautifulSoup
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
@@ -38,6 +39,15 @@ openai.api_key = api_key
 
 # FastAPI application
 app = FastAPI()
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://3.237.188.129"],  # Your frontend URL
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
 
 # Make sure these environment variables are set in your system or .env:
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
@@ -484,39 +494,6 @@ def home():
     return {"message": "API is running!"}
 
 
-@app.get("/api/mostDiscussed", response_model=schemas.PaginatedResponse)
-def get_most_discussed(
-        page: int = Query(1, ge=1),
-        size: int = Query(10, ge=1, le=100),
-        db: Session = Depends(get_db)
-):
-    """
-    Get the most discussed songs based on comment count.
-    Includes pagination support.
-    """
-    # Calculate total count
-    total = db.query(models.Song).join(models.Comment).group_by(models.Song.id).count()
-
-    # Get paginated results
-    songs = (
-        db.query(models.Song)
-        .join(models.Comment)
-        .group_by(models.Song.id)
-        .order_by(func.count(models.Comment.id).desc())
-        .offset((page - 1) * size)
-        .limit(size)
-        .all()
-    )
-
-    return {
-        "items": songs,
-        "total": total,
-        "page": page,
-        "size": size,
-        "pages": (total + size - 1) // size
-    }
-
-
 @app.get("/api/mostViewed", response_model=schemas.PaginatedResponse)
 def get_most_viewed(
         page: int = Query(1, ge=1),
@@ -567,154 +544,88 @@ def increment_view_count(
     return {"message": "View count updated successfully"}
 
 
-# Constants
-UPVOTE_THRESHOLD = 10  # Number of upvotes needed to trigger re-analysis
-
-
-@app.post("/api/songs/{song_id}/comments", response_model=schemas.Comment)
-async def create_comment(
-        song_id: int,
-        comment: schemas.CommentCreate,
-        request: Request,
-        db: Session = Depends(get_db),
-        current_user: Optional[str] = None  # Made optional by removing Depends(get_current_user)
+@app.post("/api/comments", response_model=schemas.CommentResponse)
+def create_comment(
+    comment: schemas.CommentCreate,
+    db: Session = Depends(get_db)
 ):
     """
-    Add a comment to a song.
-    Supports both authenticated and anonymous comments.
+    Create a new comment for a song.
+    No authentication required.
     """
-    song = db.query(models.Song).filter(models.Song.id == song_id).first()
-    if not song:
-        raise HTTPException(status_code=404, detail="Song not found")
-
-    # Get client IP address
-    client_ip = request.client.host
-    if client_ip == "testclient":  # Special case for test client
-        client_ip = "127.0.0.1"
-
+    # Create comment
     db_comment = models.Comment(
-        song_id=song_id,
-        user_id=current_user,  # Will be None for anonymous comments
-        ip_address=client_ip if not current_user else None,  # Store IP only for anonymous comments
-        content=comment.content
+        content=comment.content,
+        song_id=comment.song_id,
+        user_id=None
     )
     db.add(db_comment)
     db.commit()
     db.refresh(db_comment)
-    return db_comment
 
+    # Prepare response
+    response_data = {
+        "id": db_comment.id,
+        "content": db_comment.content,
+        "song_id": db_comment.song_id,
+        "username": "Anonymous",
+        "created_at": db_comment.created_at,
+        "updated_at": db_comment.updated_at
+    }
 
-@app.post("/api/comments/{comment_id}/upvote")
-async def upvote_comment(
-        comment_id: int,
-        request: Request,
-        db: Session = Depends(get_db)
+    return response_data
+
+@app.get("/api/songs/{song_id}/comments", response_model=List[schemas.CommentResponse])
+def get_song_comments(
+    song_id: int,
+    db: Session = Depends(get_db)
 ):
     """
-    Upvote a comment.
-    Each IP address can only upvote once.
+    Get all comments for a specific song.
+    Comments will include usernames (or 'Anonymous' if not logged in).
     """
-    comment = db.query(models.Comment).filter(models.Comment.id == comment_id).first()
-    if not comment:
-        raise HTTPException(status_code=404, detail="Comment not found")
+    # Get comments with user information
+    comments = db.query(models.Comment).filter(models.Comment.song_id == song_id).all()
+    
+    # Prepare response
+    response_data = []
+    for comment in comments:
+        username = "Anonymous"
+        if comment.user_id:
+            user = db.query(models.User).filter(models.User.id == comment.user_id).first()
+            if user:
+                username = user.username
 
-    # Get requesting IP address
-    client_ip = request.client.host
+        response_data.append({
+            "id": comment.id,
+            "content": comment.content,
+            "song_id": comment.song_id,
+            "username": username,
+            "created_at": comment.created_at,
+            "updated_at": comment.updated_at
+        })
 
-    # Check if this IP has already upvoted
-    existing_upvote = db.query(models.CommentUpvote).filter(
-        models.CommentUpvote.comment_id == comment_id,
-        models.CommentUpvote.ip_address == client_ip
-    ).first()
-
-    if existing_upvote:
-        # If we're in test environment, simulate rate limiting for the test
-        if ENV == "test" and "/rate_limiting" in str(request.url):
-            raise HTTPException(status_code=429, detail="Too many requests")
-        else:
-            raise HTTPException(status_code=400, detail="You have already upvoted this comment")
-
-    # Create upvote
-    upvote = models.CommentUpvote(
-        comment_id=comment_id,
-        ip_address=client_ip
-    )
-    db.add(upvote)
-
-    # Increment upvote count
-    comment.upvote_count += 1
-    db.commit()
-
-    # Check if we need to trigger re-analysis
-    if comment.upvote_count >= UPVOTE_THRESHOLD:
-        # Get the latest analysis
-        latest_analysis = db.query(models.Analysis).filter(
-            models.Analysis.song_id == comment.song_id
-        ).order_by(models.Analysis.version.desc()).first()
-
-        if latest_analysis:
-            # Trigger re-analysis
-            try:
-                new_analysis = re_analyze_endpoint({
-                    "oldAnalysis": json.loads(latest_analysis.analysis_data),
-                    "newComment": comment.content,
-                    "artist": comment.song.artist,
-                    "track": comment.song.title
-                })
-
-                # Save new analysis
-                db_analysis = models.Analysis(
-                    song_id=comment.song_id,
-                    analysis_data=json.dumps(new_analysis),
-                    version=latest_analysis.version + 1
-                )
-                db.add(db_analysis)
-                db.commit()
-            except Exception as e:
-                logging.error(f"Error during re-analysis: {e}")
-                # Don't raise the error, just log it
-
-    return {"message": "Comment upvoted successfully"}
-
+    return response_data
 
 @app.delete("/api/comments/{comment_id}")
-async def delete_comment(
-        comment_id: int,
-        request: Request,
-        db: Session = Depends(get_db),
-        current_user: Optional[str] = None  # Made optional
+def delete_comment(
+    comment_id: int,
+    db: Session = Depends(get_db),
+    current_user: Optional[models.User] = Depends(get_current_user)
 ):
     """
-    Delete a comment.
-    Users can only delete their own comments.
+    Delete a comment. Only the user who created the comment can delete it.
     """
     comment = db.query(models.Comment).filter(models.Comment.id == comment_id).first()
     if not comment:
         raise HTTPException(status_code=404, detail="Comment not found")
 
-    client_ip = request.client.host
-    if client_ip == "testclient":  # Special case for test client
-        client_ip = "127.0.0.1"
+    # Check if user is authorized to delete the comment
+    if not current_user or comment.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to delete this comment")
 
-    # Check if user has permission to delete
-    if current_user:
-        # Authenticated user can only delete their own comments
-        if comment.user_id != current_user:
-            raise HTTPException(status_code=403, detail="You can only delete your own comments")
-    else:
-        # Anonymous user can only delete their own comments by IP
-        if comment.ip_address != client_ip:
-            raise HTTPException(status_code=403, detail="You can only delete your own comments")
-
-    # Delete all upvotes first
-    db.query(models.CommentUpvote).filter(
-        models.CommentUpvote.comment_id == comment_id
-    ).delete()
-
-    # Delete the comment
     db.delete(comment)
     db.commit()
-
     return {"message": "Comment deleted successfully"}
 
 

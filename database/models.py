@@ -23,8 +23,6 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    comments = relationship("Comment", back_populates="user")
-
 
 class Song(Base):
     __tablename__ = "songs"
@@ -37,36 +35,8 @@ class Song(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    comments = relationship("Comment", back_populates="song")
     analyses = relationship("Analysis", back_populates="song")
-
-
-class Comment(Base):
-    __tablename__ = "comments"
-
-    id = Column(Integer, primary_key=True, index=True)
-    song_id = Column(Integer, ForeignKey("songs.id"))
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # Allow anonymous comments
-    ip_address = Column(String, nullable=True)  # Store IP for anonymous comments
-    content = Column(Text)
-    upvote_count = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    song = relationship("Song", back_populates="comments")
-    user = relationship("User", back_populates="comments")
-    upvotes = relationship("CommentUpvote", back_populates="comment")
-
-
-class CommentUpvote(Base):
-    __tablename__ = "comment_upvotes"
-
-    id = Column(Integer, primary_key=True, index=True)
-    comment_id = Column(Integer, ForeignKey("comments.id"))
-    ip_address = Column(String)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-    comment = relationship("Comment", back_populates="upvotes")
+    comments = relationship("Comment", back_populates="song")
 
 
 class Analysis(Base):
@@ -80,3 +50,22 @@ class Analysis(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     song = relationship("Song", back_populates="analyses")
+
+
+class Comment(Base):
+    __tablename__ = "comments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    song_id = Column(Integer, ForeignKey("songs.id"))
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    content = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    song = relationship("Song", back_populates="comments")
+    user = relationship("User", back_populates="comments")
+
+# Add relationship to Song model
+Song.comments = relationship("Comment", back_populates="song")
+# Add relationship to User model
+User.comments = relationship("Comment", back_populates="user")
