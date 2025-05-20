@@ -56,26 +56,15 @@ class User(UserBase):
 
 class CommentBase(BaseModel):
     content: str
-    song_id: int
+    song_id: int  # This is the external song ID from Genius API
 
 class CommentCreate(CommentBase):
     pass
 
-class Comment(CommentBase):
+class CommentResponse(CommentBase):
     id: int
-    user_id: Optional[int] = None
-    username: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    username: Optional[str] = None  # Add username field for display
 
     model_config = ConfigDict(from_attributes=True)
-
-class CommentResponse(BaseModel):
-    id: int
-    content: str
-    song_id: int
-    username: str
-    created_at: datetime
-    updated_at: datetime
-
-    model_config = ConfigDict(from_attributes=True) 

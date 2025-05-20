@@ -43,7 +43,7 @@ app = FastAPI()
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://3.237.188.129"],  # Your frontend URL
+    allow_origins=["http://localhost:3000"],  # Your frontend URL
     allow_credentials=True,
     allow_methods=["*"],  # Allows all methods
     allow_headers=["*"],  # Allows all headers
@@ -398,28 +398,26 @@ def analyze_lyrics_with_function_call(song_title: str, artist: str, lyrics: str)
         raise HTTPException(status_code=500, detail="Error contacting OpenAI API")
 
 
+class ReAnalyzeRequest(BaseModel):
+    oldAnalysis: dict
+    newComment: str
+    artist: str
+    track: str
+
 @app.post("/re_analyze")
-def re_analyze_endpoint(data: dict):
+def re_analyze_endpoint(data: ReAnalyzeRequest):
     """
     Accepts an existing analysis and a new viewer comment, and returns an updated analysis.
     The endpoint instructs the AI to update the analysis by integrating the new viewer comment into the narrative.
     Rather than simply appending the comment, the updated analysis should incorporate its sentiment and perspective into the
     existing insights. If the comment is not constructive, return the analysis unchanged (except for incrementing the version number
     and noting that the comment was not integrated).
-
-    Expected input:
-    {
-      "oldAnalysis": { ... },  // JSON object following the LyricAnalysis schema plus any extras
-      "newComment": "viewer comment text",
-      "artist": "Artist Name",
-      "track": "Track Title"
-    }
     """
     try:
-        old_analysis = data.get("oldAnalysis", {})
-        new_comment = data.get("newComment", "")
-        artist = data.get("artist", "")
-        track = data.get("track", "")
+        old_analysis = data.oldAnalysis
+        new_comment = data.newComment
+        artist = data.artist
+        track = data.track
         if isinstance(old_analysis, str):
             old_analysis = json.loads(old_analysis)
     except Exception as e:
@@ -546,87 +544,232 @@ def increment_view_count(
 
 @app.post("/api/comments", response_model=schemas.CommentResponse)
 def create_comment(
-    comment: schemas.CommentCreate,
-    db: Session = Depends(get_db)
+        comment: schemas.CommentCreate,
+        db: Session = Depends(get_db)
 ):
     """
-    Create a new comment for a song.
-    No authentication required.
+    Create a new comment for a song from Genius API.
+    If authenticated, uses the user's username, otherwise uses 'User'.
     """
+    # First, check if the external song reference exists
+    song_reference = db.query(models.ExternalSongReference).filter(
+        models.ExternalSongReference.external_id == comment.song_id
+    ).first()
+
+    # If not, create a new reference (we'll need to get title/artist from query params)
+    if not song_reference:
+        # Create a new external song reference
+        song_reference = models.ExternalSongReference(
+            external_id=comment.song_id,
+            title="Unknown",  # This will be updated when we get more info
+            artist="Unknown"
+        )
+        db.add(song_reference)
+        db.commit()
+        db.refresh(song_reference)
+
     # Create comment
     db_comment = models.Comment(
         content=comment.content,
-        song_id=comment.song_id,
-        user_id=None
+        external_song_id=comment.song_id
     )
     db.add(db_comment)
     db.commit()
     db.refresh(db_comment)
 
-    # Prepare response
-    response_data = {
-        "id": db_comment.id,
-        "content": db_comment.content,
-        "song_id": db_comment.song_id,
-        "username": "Anonymous",
-        "created_at": db_comment.created_at,
-        "updated_at": db_comment.updated_at
-    }
+    # Create response object
+    response = schemas.CommentResponse(
+        id=db_comment.id,
+        content=db_comment.content,
+        song_id=db_comment.external_song_id,
+        created_at=db_comment.created_at,
+        updated_at=db_comment.updated_at,
+        username="You"
+    )
 
-    return response_data
+    return response
+
 
 @app.get("/api/songs/{song_id}/comments", response_model=List[schemas.CommentResponse])
 def get_song_comments(
-    song_id: int,
-    db: Session = Depends(get_db)
+        song_id: int,
+        db: Session = Depends(get_db)
 ):
     """
-    Get all comments for a specific song.
-    Comments will include usernames (or 'Anonymous' if not logged in).
+    Get all comments for a specific song from Genius API.
     """
     # Get comments with user information
-    comments = db.query(models.Comment).filter(models.Comment.song_id == song_id).all()
-    
-    # Prepare response
-    response_data = []
-    for comment in comments:
-        username = "Anonymous"
-        if comment.user_id:
-            user = db.query(models.User).filter(models.User.id == comment.user_id).first()
-            if user:
-                username = user.username
+    comments = db.query(models.Comment, models.User.username) \
+        .outerjoin(models.User, models.Comment.user_id == models.User.id) \
+        .filter(models.Comment.external_song_id == song_id) \
+        .all()
 
-        response_data.append({
-            "id": comment.id,
-            "content": comment.content,
-            "song_id": comment.song_id,
-            "username": username,
-            "created_at": comment.created_at,
-            "updated_at": comment.updated_at
-        })
+    # Format the results
+    result = []
+    for comment, username in comments:
+        result.append(schemas.CommentResponse(
+            id=comment.id,
+            content=comment.content,
+            song_id=comment.external_song_id,
+            created_at=comment.created_at,
+            updated_at=comment.updated_at,
+            username=username if username else "User"
+        ))
 
-    return response_data
+    return result
+
 
 @app.delete("/api/comments/{comment_id}")
 def delete_comment(
-    comment_id: int,
-    db: Session = Depends(get_db),
-    current_user: Optional[models.User] = Depends(get_current_user)
+        comment_id: int,
+        db: Session = Depends(get_db)
 ):
     """
-    Delete a comment. Only the user who created the comment can delete it.
+    Delete a comment. No authentication required.
     """
     comment = db.query(models.Comment).filter(models.Comment.id == comment_id).first()
     if not comment:
         raise HTTPException(status_code=404, detail="Comment not found")
 
-    # Check if user is authorized to delete the comment
-    if not current_user or comment.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not authorized to delete this comment")
-
     db.delete(comment)
     db.commit()
     return {"message": "Comment deleted successfully"}
+
+
+@app.post("/api/songs/{song_id}/view")
+def increment_view_count(
+        song_id: int,
+        title: Optional[str] = None,
+        artist: Optional[str] = None,
+        db: Session = Depends(get_db),
+        current_user: Optional[models.User] = Depends(get_current_user)
+):
+    """
+    Increment the view count for an external song.
+    Works for both anonymous and authenticated users.
+    """
+    # Find or create the external song reference
+    song_reference = db.query(models.ExternalSongReference).filter(
+        models.ExternalSongReference.external_id == song_id
+    ).first()
+
+    if not song_reference:
+        # Create a new external song reference
+        song_reference = models.ExternalSongReference(
+            external_id=song_id,
+            title=title or "Unknown",
+            artist=artist or "Unknown",
+            view_count=0
+        )
+        db.add(song_reference)
+
+    # Increment the view count
+    song_reference.view_count += 1
+
+    # Update title and artist if provided
+    if title:
+        song_reference.title = title
+    if artist:
+        song_reference.artist = artist
+
+    db.commit()
+
+    return {"message": "View count updated successfully"}
+
+
+@app.get("/api/mostViewed", response_model=schemas.PaginatedResponse)
+def get_most_viewed(
+        page: int = Query(1, ge=1),
+        size: int = Query(10, ge=1, le=100),
+        db: Session = Depends(get_db)
+):
+    """
+    Get the most viewed songs based on view count from external song references.
+    Includes pagination support.
+    """
+    # Calculate total count
+    total = db.query(models.ExternalSongReference).count()
+
+    # Get paginated results
+    song_references = (
+        db.query(models.ExternalSongReference)
+        .order_by(models.ExternalSongReference.view_count.desc())
+        .offset((page - 1) * size)
+        .limit(size)
+        .all()
+    )
+
+    # Convert to Song objects for the response
+    songs = []
+    for ref in song_references:
+        songs.append(schemas.Song(
+            id=ref.external_id,
+            title=ref.title,
+            artist=ref.artist,
+            lyrics="",  # We don't store lyrics locally
+            view_count=ref.view_count,
+            created_at=ref.created_at,
+            updated_at=ref.updated_at
+        ))
+
+    return {
+        "items": songs,
+        "total": total,
+        "page": page,
+        "size": size,
+        "pages": (total + size - 1) // size
+    }
+
+
+@app.post("/api/comments/{comment_id}/upvote")
+def upvote_comment(
+    comment_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Upvote a comment. Each IP address can only upvote a comment once.
+    """
+    comment = db.query(models.Comment).filter(models.Comment.id == comment_id).first()
+    if not comment:
+        raise HTTPException(status_code=404, detail="Comment not found")
+
+    # Increment upvote count
+    comment.upvote_count += 1
+    db.commit()
+
+    # If upvote count reaches threshold (e.g., 10), trigger re-analysis
+    if comment.upvote_count >= 10:
+        # Get the latest analysis for this song
+        latest_analysis = db.query(models.Analysis).filter(
+            models.Analysis.external_song_id == comment.external_song_id
+        ).order_by(models.Analysis.version.desc()).first()
+
+        if latest_analysis:
+            # Create re-analysis request
+            re_analyze_data = ReAnalyzeRequest(
+                oldAnalysis=json.loads(latest_analysis.analysis_data),
+                newComment=comment.content,
+                artist=comment.song_reference.artist,
+                track=comment.song_reference.title
+            )
+
+            # Call re-analyze endpoint
+            try:
+                updated_analysis = re_analyze_endpoint(re_analyze_data)
+                
+                # Save new analysis
+                new_analysis = models.Analysis(
+                    external_song_id=comment.external_song_id,
+                    analysis_data=json.dumps(updated_analysis),
+                    version=latest_analysis.version + 1
+                )
+                db.add(new_analysis)
+                db.commit()
+            except Exception as e:
+                logging.error(f"Error during re-analysis: {e}")
+                # Continue even if re-analysis fails
+
+    return {"message": "Comment upvoted successfully", "upvote_count": comment.upvote_count}
 
 
 if __name__ == "__main__":
