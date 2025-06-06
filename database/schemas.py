@@ -66,5 +66,6 @@ class CommentResponse(CommentBase):
     created_at: datetime
     updated_at: datetime
     username: Optional[str] = None  # Add username field for display
+    upvote_count: int = 0  # Add upvote count field
 
     model_config = ConfigDict(from_attributes=True)

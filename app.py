@@ -15,6 +15,10 @@ from database.config import get_db
 from database import models, schemas
 from sqlalchemy import func
 from database.security import auth, get_current_user, RateLimitMiddleware, generate_token
+import functools
+import time
+from fastapi.responses import JSONResponse
+from fastapi.middleware.gzip import GZipMiddleware
 
 ##
 
@@ -63,6 +67,35 @@ GENIUS_LYRICS_URL = "https://genius-song-lyrics1.p.rapidapi.com/song/lyrics/"
 # Add rate limiting middleware
 app.add_middleware(RateLimitMiddleware)
 
+# Add GZip compression middleware
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# Cache for lyrics with 1 hour expiration
+lyrics_cache = {}
+CACHE_EXPIRATION = 3600  # 1 hour in seconds
+
+def cache_lyrics(func):
+    @functools.wraps(func)
+    def wrapper(song_id: int):
+        current_time = time.time()
+        
+        # Check cache
+        if song_id in lyrics_cache:
+            cache_entry = lyrics_cache[song_id]
+            if current_time - cache_entry['timestamp'] < CACHE_EXPIRATION:
+                return cache_entry['data']
+        
+        # If not in cache or expired, get fresh data
+        result = func(song_id)
+        
+        # Update cache
+        lyrics_cache[song_id] = {
+            'data': result,
+            'timestamp': current_time
+        }
+        
+        return result
+    return wrapper
 
 # Add authentication models
 class UserCreate(BaseModel):
@@ -98,6 +131,7 @@ def login(user: schemas.UserCreate, db: Session = Depends(get_db)):
 
 
 # Helper function to get lyrics by song ID
+@cache_lyrics
 def get_lyrics_by_id(song_id: int):
     if ENV == "test":
         # Return mock data for testing
@@ -248,13 +282,13 @@ def search_lyrics_endpoint(
 
 # FastAPI route for analyzing lyrics
 @app.get("/analyze_lyrics")
-def analyze_lyrics_endpoint(record_id: int, track: str = "", artist: str = ""):
+async def analyze_lyrics_endpoint(record_id: int, track: str = "", artist: str = ""):
     try:
+        # Get lyrics from cache or API
         lyrics_data = get_lyrics_by_id(song_id=record_id)
         lyrics_text = lyrics_data.get("plainLyrics", "")
 
         if ENV == "test":
-            # Return mock analysis for testing
             return {
                 "analysis": {
                     "overallHeadline": "Test Analysis",
@@ -267,16 +301,27 @@ def analyze_lyrics_endpoint(record_id: int, track: str = "", artist: str = ""):
                 "lyrics": lyrics_text
             }
 
+        # Analyze lyrics with optimized function
         analysis_json = analyze_lyrics_with_function_call(
             song_title=track or "Unknown Title",
             artist=artist or "Unknown Artist",
             lyrics=lyrics_text
         )
 
-        return {
+        # Update view count in database
+        db = next(get_db())
+        song_ref = db.query(models.ExternalSongReference).filter(
+            models.ExternalSongReference.external_id == record_id
+        ).first()
+        
+        if song_ref:
+            song_ref.view_count += 1
+            db.commit()
+
+        return JSONResponse({
             "analysis": analysis_json,
             "lyrics": lyrics_text
-        }
+        })
 
     except Exception as e:
         logging.error(f"Error in /analyze_lyrics: {str(e)}")
@@ -302,71 +347,28 @@ class LyricAnalysis(BaseModel):
 # Helper function to analyze lyrics using OpenAI
 def analyze_lyrics_with_function_call(song_title: str, artist: str, lyrics: str) -> dict:
     """
-    This function generates a cohesive lyric analysis for the song using the OpenAI API.
+    Optimized version of the lyrics analysis function
     """
     messages = [
         {
             "role": "user",
             "content": (
-                "You are a highly skilled music analyst. Your task is to write a flowing, narrative-style lyric analysis "
-                "that feels deeply connected to the song's emotional journey and cultural context. The language should "
-                "adapt naturally to the track's vibe—whether it's a gentle, reflective piece or an upbeat, electrifying anthem—"
-                "and speak to a broad range of listeners without resorting to complex jargon or first-person pronouns.\n\n"
-
-                "Structure & Requirements:\n\n"
-
-                "1. **Overall Headline**:\n"
-                "   - Begin the final output with a concise, striking phrase that captures the song's primary essence.\n\n"
-
-                "2. **Introduction & Hook**:\n"
-                "   - Start with a captivating opening that immediately sets the emotional or conceptual tone.\n"
-                "   - Reference any standout imagery or initial themes found in the lyrics.\n\n"
-
-                "3. **Narrative Flow**:\n"
-                "   - Guide the reader through the song's progression in a natural storyline, mentioning relevant sections (Intro, Verse, Chorus, Bridge, etc.).\n"
-                "   - Incorporate at least one direct quote from each unique section, weaving it seamlessly into the analysis rather than isolating it.\n"
-                "   - Provide a 2–6 word 'verseSummary' for each section that highlights its main idea.\n"
-                "   - Emphasize changes in perspective or mood, ensuring the write-up has a sense of forward motion.\n\n"
-
-                "4. **Contextual & Cultural Nuance**:\n"
-                "   - Bring depth to the analysis by noting cultural, historical, or social references in the lyrics where relevant.\n"
-                "   - Connect these references to broader human experiences—love, transformation, ambition, etc.—to ground the song's impact in shared realities.\n\n"
-
-                "5. **Emotional Arc & Theme Development**:\n"
-                "   - Explore how each part of the song builds upon the previous one, gradually revealing the emotional core.\n"
-                "   - Discuss any notable shifts in tone, lyrical perspective, or intensity that deepen the narrative.\n"
-                "   - Avoid first-person pronouns, maintaining a universal viewpoint that invites listeners of all backgrounds to engage.\n\n"
-
-                "6. **Conclusion & Reflection**:\n"
-                "   - Wrap up with a unifying reflection that ties the entire journey together.\n"
-                "   - Offer a memorable insight or takeaway, showing how the song's message resonates beyond the music itself.\n\n"
-
-                "7. **Final Output Format**:\n"
-                "   - Return one strictly valid JSON object matching the following schema:\n"
-                "     {\n"
-                "       \"overallHeadline\": str,\n"
-                "       \"songTitle\": str,\n"
-                "       \"artist\": str,\n"
-                "       \"introduction\": str,\n"
-                "       \"sectionAnalyses\": [\n"
-                "         {\n"
-                "           \"sectionName\": str,\n"
-                "           \"verseSummary\": str,\n"
-                "           \"quotedLines\": (optional) str,\n"
-                "           \"analysis\": str\n"
-                "         }, ...\n"
-                "       ],\n"
-                "       \"conclusion\": str\n"
-                "     }\n\n"
-                "   - Include each field exactly as listed, with no extra keys or commentary.\n\n"
-
-                "Incorporate these instructions to create a highly engaging, context-rich analysis that reads like a journey "
-                "through the song's evolving landscape. Use vivid yet accessible language that resonates with a wide audience."
-            )
-        },
-        {
-            "role": "user",
-            "content": (
+                "Analyze these song lyrics concisely. Focus on key themes, emotional journey, and cultural context. "
+                "Return a JSON object with these fields:\n"
+                "{\n"
+                "  \"overallHeadline\": str,\n"
+                "  \"songTitle\": str,\n"
+                "  \"artist\": str,\n"
+                "  \"introduction\": str,\n"
+                "  \"sectionAnalyses\": [\n"
+                "    {\n"
+                "      \"sectionName\": str,\n"
+                "      \"verseSummary\": str,\n"
+                "      \"analysis\": str\n"
+                "    }\n"
+                "  ],\n"
+                "  \"conclusion\": str\n"
+                "}\n\n"
                 f"Song Title: {song_title}\n"
                 f"Artist: {artist}\n\n"
                 f"Lyrics: {lyrics}"
@@ -375,23 +377,15 @@ def analyze_lyrics_with_function_call(song_title: str, artist: str, lyrics: str)
     ]
 
     try:
-        # Correctly using the OpenAI API for chat-based completions
         response = openai.ChatCompletion.create(
-            model="gpt-4",  # Or use "gpt-3.5-turbo" if you prefer
+            model="gpt-3.5-turbo",  # Using faster model
             messages=messages,
-            max_tokens=1500  # Adjust this based on how much output you need
+            max_tokens=800,  # Reduced token count
+            temperature=0.7  # Added temperature for faster response
         )
 
-        # Extract and return the result from OpenAI's response
         analysis = response['choices'][0]['message']['content'].strip()
-        return {
-            "overallHeadline": "Song Analysis",
-            "songTitle": song_title,
-            "artist": artist,
-            "introduction": "A deep dive into the song's lyrics, capturing its essence and emotional flow.",
-            "sectionAnalyses": [],  # You can extend this if you need detailed section-by-section analysis
-            "conclusion": analysis
-        }
+        return json.loads(analysis)
 
     except openai.error.OpenAIError as e:
         logging.error(f"OpenAI API error: {e}")
@@ -542,33 +536,97 @@ def increment_view_count(
     return {"message": "View count updated successfully"}
 
 
-@app.post("/api/comments", response_model=schemas.CommentResponse)
-def create_comment(
+@app.post("/api/comments/authenticated", response_model=schemas.CommentResponse)
+def create_authenticated_comment(
         comment: schemas.CommentCreate,
-        db: Session = Depends(get_db)
+        title: Optional[str] = Query(None),
+        artist: Optional[str] = Query(None),
+        db: Session = Depends(get_db),
+        current_user: models.User = Depends(get_current_user)
 ):
     """
-    Create a new comment for a song from Genius API.
-    If authenticated, uses the user's username, otherwise uses 'User'.
+    Create a new comment for a song from Genius API for authenticated users.
+    Uses the actual username of the logged-in user.
     """
     # First, check if the external song reference exists
     song_reference = db.query(models.ExternalSongReference).filter(
         models.ExternalSongReference.external_id == comment.song_id
     ).first()
 
-    # If not, create a new reference (we'll need to get title/artist from query params)
+    # If not, create a new reference with title and artist from query params
     if not song_reference:
         # Create a new external song reference
         song_reference = models.ExternalSongReference(
             external_id=comment.song_id,
-            title="Unknown",  # This will be updated when we get more info
-            artist="Unknown"
+            title=title or "Unknown",
+            artist=artist or "Unknown"
         )
         db.add(song_reference)
         db.commit()
         db.refresh(song_reference)
+    elif title and artist:  # Update existing reference if new info is provided
+        song_reference.title = title
+        song_reference.artist = artist
+        db.commit()
+        db.refresh(song_reference)
 
-    # Create comment
+    # Create comment with user_id
+    db_comment = models.Comment(
+        content=comment.content,
+        external_song_id=comment.song_id,
+        user_id=current_user.id
+    )
+    db.add(db_comment)
+    db.commit()
+    db.refresh(db_comment)
+
+    # Create response object with actual username
+    response = schemas.CommentResponse(
+        id=db_comment.id,
+        content=db_comment.content,
+        song_id=db_comment.external_song_id,
+        created_at=db_comment.created_at,
+        updated_at=db_comment.updated_at,
+        username=current_user.username
+    )
+
+    return response
+
+
+@app.post("/api/comments/anonymous", response_model=schemas.CommentResponse)
+def create_anonymous_comment(
+        comment: schemas.CommentCreate,
+        title: Optional[str] = Query(None),
+        artist: Optional[str] = Query(None),
+        db: Session = Depends(get_db)
+):
+    """
+    Create a new comment for a song from Genius API for anonymous users.
+    Uses 'Anonymous' as the username.
+    """
+    # First, check if the external song reference exists
+    song_reference = db.query(models.ExternalSongReference).filter(
+        models.ExternalSongReference.external_id == comment.song_id
+    ).first()
+
+    # If not, create a new reference with title and artist from query params
+    if not song_reference:
+        # Create a new external song reference
+        song_reference = models.ExternalSongReference(
+            external_id=comment.song_id,
+            title=title or "Unknown",
+            artist=artist or "Unknown"
+        )
+        db.add(song_reference)
+        db.commit()
+        db.refresh(song_reference)
+    elif title and artist:  # Update existing reference if new info is provided
+        song_reference.title = title
+        song_reference.artist = artist
+        db.commit()
+        db.refresh(song_reference)
+
+    # Create comment without user_id
     db_comment = models.Comment(
         content=comment.content,
         external_song_id=comment.song_id
@@ -577,14 +635,14 @@ def create_comment(
     db.commit()
     db.refresh(db_comment)
 
-    # Create response object
+    # Create response object with 'Anonymous' username
     response = schemas.CommentResponse(
         id=db_comment.id,
         content=db_comment.content,
         song_id=db_comment.external_song_id,
         created_at=db_comment.created_at,
         updated_at=db_comment.updated_at,
-        username="You"
+        username="Anonymous"
     )
 
     return response
@@ -613,7 +671,8 @@ def get_song_comments(
             song_id=comment.external_song_id,
             created_at=comment.created_at,
             updated_at=comment.updated_at,
-            username=username if username else "User"
+            username=username if username else "Anonymous",
+            upvote_count=comment.upvote_count
         ))
 
     return result
